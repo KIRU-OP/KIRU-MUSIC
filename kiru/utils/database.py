@@ -7,6 +7,7 @@ from kiru.core.mongo import mongodb
 authdb = mongodb.adminauth
 authuserdb = mongodb.authuser
 autoenddb = mongodb.autoend
+autoplaydb = mongodb.autoplay
 assdb = mongodb.assistants
 blacklist_chatdb = mongodb.blacklistChat
 blockeddb = mongodb.blockedusers
@@ -34,6 +35,7 @@ loop = {}
 maintenance = []
 nonadmin = {}
 pause = {}
+autoplaymode = {}
 playmode = {}
 playtype = {}
 skipmode = {}
@@ -176,6 +178,32 @@ async def skip_off(chat_id: int):
     user = await skipdb.find_one({"chat_id": chat_id})
     if not user:
         return await skipdb.insert_one({"chat_id": chat_id})
+
+
+async def is_autoplay(chat_id: int) -> bool:
+    mode = autoplaymode.get(chat_id)
+    if mode is None:
+        user = await autoplaydb.find_one({"chat_id": chat_id})
+        if not user:
+            autoplaymode[chat_id] = False
+            return False
+        autoplaymode[chat_id] = True
+        return True
+    return mode
+
+
+async def autoplay_on(chat_id: int):
+    autoplaymode[chat_id] = True
+    user = await autoplaydb.find_one({"chat_id": chat_id})
+    if not user:
+        return await autoplaydb.insert_one({"chat_id": chat_id})
+
+
+async def autoplay_off(chat_id: int):
+    autoplaymode[chat_id] = False
+    user = await autoplaydb.find_one({"chat_id": chat_id})
+    if user:
+        return await autoplaydb.delete_one({"chat_id": chat_id})
 
 
 async def get_upvote_count(chat_id: int) -> int:
