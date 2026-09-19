@@ -18,5 +18,7 @@ RUN pip3 install --no-cache-dir -U -r requirements.txt
 # 5. NODE JS VERIFY KAREIN (Ye step check karega ki node hai ya nahi)
 RUN node -v && npm -v
 
-# 6. Bot start karein
-CMD ["bash", "start"]
+# 6. Bot start karein (direct launch, no interactive installer)
+COPY docker-start /app/docker-start
+RUN chmod +x /app/docker-start
+CMD ["bash", "docker-start"]
