@@ -16,6 +16,8 @@ from pytgcalls.types.input_stream import AudioPiped, AudioVideoPiped
 from pytgcalls.types.input_stream.quality import HighQualityAudio, MediumQualityVideo
 from pytgcalls.types.stream import StreamAudioEnded
 
+import yt_dlp
+
 import config
 from kiru import LOGGER, YouTube, app
 from kiru.misc import db
@@ -26,6 +28,7 @@ from kiru.utils.database import (
     get_loop,
     group_assistant,
     is_autoend,
+    is_autoplay,
     music_on,
     remove_active_chat,
     remove_active_video_chat,
@@ -35,11 +38,38 @@ from kiru.utils.exceptions import AssistantErr
 from kiru.utils.formatters import check_duration, seconds_to_min, speed_converter
 from kiru.utils.inline.play import stream_markup
 from kiru.utils.stream.autoclear import auto_clean
+from kiru.utils.stream.queue import put_queue
 from kiru.utils.thumbnails import get_thumb
 from strings import get_string
 
 autoend = {}
 counter = {}
+
+
+async def _get_autoplay_song(vidid: str):
+    """
+    Given the video id that just finished playing, return a related
+    video id to play next, or None if nothing usable was found.
+    """
+
+    def extract():
+        try:
+            with yt_dlp.YoutubeDL(
+                {"quiet": True, "no_warnings": True, "extract_flat": True}
+            ) as ydl:
+                info = ydl.extract_info(
+                    f"https://www.youtube.com/watch?v={vidid}", download=False
+                )
+                related = info.get("related_videos") or []
+                for entry in related:
+                    rid = entry.get("id")
+                    if rid and rid != vidid:
+                        return rid
+        except Exception:
+            return None
+        return None
+
+    return await asyncio.get_event_loop().run_in_executor(None, extract)
 
 
 async def _clear_(chat_id):
@@ -329,6 +359,86 @@ class Call(PyTgCalls):
             if users == 1:
                 autoend[chat_id] = datetime.now() + timedelta(minutes=1)
 
+    async def autoplay_stream(self, client, chat_id, popped):
+        """
+        Called when the queue just went empty. Tries to fetch a song
+        related to the one that finished (`popped`) and keep the
+        stream going instead of leaving the call.
+        Returns True if it queued and started a new track, False if
+        the caller should fall back to leaving the call as usual.
+        """
+        old_vidid = popped.get("vidid")
+        original_chat_id = popped.get("chat_id")
+        video = True if str(popped.get("streamtype")) == "video" else False
+
+        if not old_vidid or old_vidid in ("telegram", "soundcloud"):
+            return False
+
+        next_vidid = await _get_autoplay_song(old_vidid)
+        if not next_vidid:
+            return False
+
+        try:
+            details, _tid = await YouTube.track(next_vidid, True)
+        except Exception:
+            return False
+
+        try:
+            file_path, direct = await YouTube.download(
+                next_vidid, None, videoid=True, video=video
+            )
+        except Exception:
+            return False
+
+        stream = (
+            AudioVideoPiped(
+                file_path,
+                audio_parameters=HighQualityAudio(),
+                video_parameters=MediumQualityVideo(),
+            )
+            if video
+            else AudioPiped(file_path, audio_parameters=HighQualityAudio())
+        )
+
+        try:
+            await client.change_stream(chat_id, stream)
+        except Exception:
+            return False
+
+        language = await get_lang(chat_id)
+        _ = get_string(language)
+        title = (details["title"]).title()
+        duration_min = details["duration_min"]
+
+        await put_queue(
+            chat_id,
+            original_chat_id,
+            file_path if direct else f"vid_{next_vidid}",
+            title,
+            duration_min,
+            "Autoplay",
+            next_vidid,
+            app.id,
+            "video" if video else "audio",
+        )
+
+        img = await get_thumb(next_vidid)
+        button = stream_markup(_, chat_id)
+        run = await app.send_photo(
+            original_chat_id,
+            photo=img,
+            caption=_["stream_1"].format(
+                f"https://t.me/{app.username}?start=info_{next_vidid}",
+                title[:23],
+                duration_min,
+                "Autoplay",
+            ),
+            reply_markup=InlineKeyboardMarkup(button),
+        )
+        db[chat_id][0]["mystic"] = run
+        db[chat_id][0]["markup"] = "stream"
+        return True
+
     async def change_stream(self, client, chat_id):
         check = db.get(chat_id)
         popped = None
@@ -341,6 +451,10 @@ class Call(PyTgCalls):
                 await set_loop(chat_id, loop)
             await auto_clean(popped)
             if not check:
+                if popped and await is_autoplay(chat_id):
+                    added = await self.autoplay_stream(client, chat_id, popped)
+                    if added:
+                        return
                 await _clear_(chat_id)
                 return await client.leave_group_call(chat_id)
         except:
