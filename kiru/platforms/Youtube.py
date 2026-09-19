@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import re
 from typing import List, Union
@@ -8,8 +9,17 @@ from pyrogram.enums import MessageEntityType
 from pyrogram.types import Message
 from youtubesearchpython.__future__ import VideosSearch, Playlist
 
+logger = logging.getLogger("Youtube")
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter("[%(asctime)s] %(levelname)s %(name)s: %(message)s"))
+    logger.addHandler(_handler)
+    logger.setLevel(logging.INFO)
+
 API_URL = os.environ.get("MEOW_API_URL", "https://music.yukiapi.site")
-API_KEY = os.environ.get("MEOW_API_KEY", "yuki_7df1554f161bfa6ac85a56d3ba917f36")  # 🔑 Get Key: @MeowApiRobot On Telegram
+API_KEY = os.environ.get("MEOW_API_KEY")  # ⚠️ set this via environment variable — no hardcoded fallback
+if not API_KEY:
+    logger.warning("MEOW_API_KEY is not set. Downloads via the Meow API will fail until you set it.")
 
 DOWNLOAD_DIR = "downloads"
 
@@ -27,8 +37,10 @@ DOWNLOAD_DIR = "downloads"
 # pool below rotates to the next key on quotaExceeded, so effective daily
 # quota = 10,000 × number of keys. Only when every key is exhausted does it
 # fall back to a quota-free yt-dlp search (see _ytdlp_search_fallback).
-_raw_keys = os.environ.get("YOUTUBE_API_KEYS", "AIzaSyAuWd41xKkkd0HDq87dK9jHffW6lKzKWJs, AIzaSyBT9ffbKLBhRQDr8WWt3IH4FcXqenFjoO0, AIzaSyB3Mf15uCZ3oqpWRRScj9jxDt0WUI0YYJc").strip()
+_raw_keys = os.environ.get("YOUTUBE_API_KEYS", "").strip()
 YOUTUBE_API_KEYS: List[str] = [k.strip() for k in _raw_keys.split(",") if k.strip()]
+if not YOUTUBE_API_KEYS:
+    logger.warning("YOUTUBE_API_KEYS is not set. Falling back to quota-free yt-dlp search only.")
 
 YOUTUBE_V3_BASE_URL = "https://www.googleapis.com/youtube/v3"
 
@@ -102,8 +114,13 @@ async def _v3_get(session: aiohttp.ClientSession, endpoint: str, params: dict):
                         return None
                     continue
                 # Non-quota error (bad request, disabled API, etc.) — no point rotating.
+                logger.error(
+                    "YouTube API v3 call to '%s' failed with status %s: %s",
+                    endpoint, resp.status, data
+                )
                 return None
         except Exception:
+            logger.exception("Exception while calling YouTube API v3 endpoint '%s'", endpoint)
             return None
     return None
 
@@ -374,6 +391,7 @@ async def download_song(link: str) -> str:
             return file_path
         return None
     except Exception:
+        logger.exception("download_song failed for video_id=%s", video_id)
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
@@ -407,6 +425,7 @@ async def download_video(link: str) -> str:
             return file_path
         return None
     except Exception:
+        logger.exception("download_video failed for video_id=%s", video_id)
         if os.path.exists(file_path):
             try:
                 os.remove(file_path)
@@ -492,7 +511,7 @@ class YouTubeAPI:
         except Exception as e:
             return 0, f"Video download error: {e}"
 
-    async def playlist(self, link, limit, user_id, videoid: Union[bool, str] = None):
+async def playlist(self, link, limit, user_id, videoid: Union[bool, str] = None):
         if videoid:
             link = self.listbase + link
         if "&" in link:
@@ -500,9 +519,10 @@ class YouTubeAPI:
         try:
             plist = await Playlist.get(link)
         except Exception:
+            logger.exception("playlist fetch failed for link=%s", link)
             return []
         videos = plist.get("videos") or []
-        ids = []
+    ids = []
         for data in videos[:limit]:
             if not data:
                 continue
@@ -511,10 +531,11 @@ class YouTubeAPI:
                 continue
             ids.append(vid)
         return ids
-
+ 
     async def track(self, link: str, videoid: Union[bool, str] = None):
         if videoid:
             link = self.base + link
         if "&" in link:
             link = link.split("&")[0]
         results = await _v3_search(link, limit=1)
+ 
